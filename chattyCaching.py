@@ -1,5 +1,6 @@
 import os
 import re
+import sqlite3
 from typing import List
 from langchain.docstore.document import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -11,22 +12,54 @@ import torch
 from langchain_community.cache import SQLiteCache
 from langchain_core.globals import set_llm_cache
 from langchain_huggingface import HuggingFacePipeline  # Corrected import statement
+import logging
+import json
 
 load_dotenv()
 
 # Define paths to the directories containing the markdown files for different clusters
 clusters = {
-    "sherlock": "/scratch/users/bcritt/sherlockMDs/",
-    "farmshare": "/scratch/users/bcritt/farmshareDocs/"
+    "sherlock": "/app/Documents/sherlock/",
+    "farmshare": "/app/Documents/farmshare/"
 }
 
-# Update the path to the new model
-local_model_path = "/oak/stanford/groups/ruthm/bcritt/.cache/huggingface/hub/models--mistralai--Mistral-7B-Instruct-v0.3/snapshots/e0bc86c23ce5aae1db576c8cca6f06f1f73af2db"
+# Initialize logging
+logging.basicConfig(level=logging.DEBUG)
 
-# Setup SQLite cache
-sqlite_cache_path = ".langchain.db"
-sqlite_cache = SQLiteCache(database_path=sqlite_cache_path)
+# Set the path for the database file in the working directory
+database_path = ".langchain.db"
+
+# Debug information
+print(f"Database path: {database_path}")
+print(f"Database exists: {os.path.exists(database_path)}")
+print(f"Database file permissions: {os.stat(database_path)}")
+
+# Only set up the SQLite cache if the file does not exist
+sqlite_cache = SQLiteCache(database_path=database_path)
 set_llm_cache(sqlite_cache)
+
+# Try connecting to the SQLite database
+try:
+    conn = sqlite3.connect(database_path)
+    with conn:
+        conn.execute('PRAGMA foreign_keys = ON')  # Ensure foreign keys are enabled
+    print("Connection to SQLite database established successfully.")
+except sqlite3.Error as e:
+    print(f"Error connecting to SQLite database: {e}")
+
+# Ensure caching routine is consistently verified valid runtime ensuring cache tracing.
+try:
+    with conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM cache_table")  
+        rows = cur.fetchall()
+        for row in rows:
+            logging.debug(f"Cache Row: {row}")
+except sqlite3.Error as e:
+    logging.error(f"Error executing cache query in DB: {e}")
+
+# Verifying Model Path and Contents
+outside_model_path = "/oak/stanford/groups/ruthm/bcritt/.cache/huggingface/hub/models--mistralai--Mistral-7B-Instruct-v0.3/snapshots/e0bc86c23ce5aae1db576c8cca6f06f1f73af2db" 
 
 # Function to ingest markdown files from a specified directory
 def ingest_markdown_files(corpusdir: str) -> List[Document]:
@@ -87,9 +120,13 @@ Summarize the user's query based on the information provided in the retrieved do
     print(f"DEBUG: LLM response type: {type(response)}")
     print(f"DEBUG: LLM response content: {response}")
 
-    # Check if response is a string and handle if it's empty or unexpected
-    if isinstance(response, str) and response.strip():
+    # Check and handle the response correctly based on type
+    if isinstance(response, list):
+        response_text = response[0]['generated_text'].strip()
+    elif isinstance(response, str):
         response_text = response.strip()
+    elif isinstance(response, dict) and 'generated_text' in response:
+        response_text = response['generated_text'].strip()
     else:
         print(f"DEBUG: Unexpected or empty LLM response - {response}")
         return None
@@ -128,8 +165,8 @@ for cluster_name, path in clusters.items():
     retriever_tools[cluster_name] = retriever_tool
 
     try:
-        model = AutoModelForCausalLM.from_pretrained(local_model_path, torch_dtype=torch.bfloat16, device_map="auto")
-        tokenizer = AutoTokenizer.from_pretrained(local_model_path)
+        model = AutoModelForCausalLM.from_pretrained(outside_model_path, torch_dtype=torch.bfloat16, device_map="auto")
+        tokenizer = AutoTokenizer.from_pretrained(outside_model_path)
 
         # Create the pipeline with the necessary parameters
         pipe = pipeline("text-generation", model=model, tokenizer=tokenizer, max_new_tokens=256, temperature=0.7, do_sample=True, pad_token_id=tokenizer.eos_token_id)
@@ -143,7 +180,7 @@ for cluster_name, path in clusters.items():
         print(f"DEBUG: Loaded agent for cluster - {cluster_name}")
 
     except Exception as e:
-        print(f"Error loading the model or tokenizer from path {local_model_path}: {e}")
+        print(f"Error loading the model or tokenizer from path {outside_model_path}: {e}")
 
 print(f"DEBUG: Agents loaded - {list(agents.keys())}")
 
